@@ -117,6 +117,7 @@ const RESET_MS = 3 * 60 * 60 * 1000;     // 自動リセット（3時間）
 const WILD_MS  = 30 * 1000;              // 野生のこざかな（SS）が出る間隔（30秒）
 const WILD_MAX = 15;                     // 野生のこざかなの最大数（増えすぎ防止）
 const WILD_NAME = '野生のこざかな';
+const WILD_NO_GROW_FROM = 3;            // このサイズ以上（3=L）は野生のこざかなを食べても大きくならない
 
 function levelFromCoins(c){ for(let i=SIZES.length-1;i>=0;i--) if(c>=SIZES[i].min) return i; return 0; }
 const MAXL=()=>SIZES.length-1;
@@ -189,7 +190,8 @@ function spawnWild(){
 }
 function eat(big,small){
   small.alive=false; big.eats++; big.pulse=1;
-  const grew=big.level<MAXL(); if(grew) big.level++;   // 食べたら1段階大きくなる
+  // 食べたら1段階大きくなる。ただしL以上は、ギフトの魚を食べたときだけ大きくなる（野生のこざかなでは変わらない）
+  const grew=big.level<MAXL() && !(small.wild && big.level>=WILD_NO_GROW_FROM); if(grew) big.level++;
   if(small.wild) fishes.delete(small.id);
   addText(small.x,small.y-8,'パクッ','#ffffff');
   for(let i=0;i<10;i++){ const a=Math.random()*6.28,s=.8+Math.random()*2.2; particles.push({t:'b',x:small.x,y:small.y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,r:1.5+Math.random()*3,life:1}); }
@@ -453,18 +455,32 @@ function handleGiftMsg(d){
   if(d.giftType===1 && d.repeatEnd===false) return;     // 連続ギフトは最後にまとめて数える
   gift(id,name,(d.diamondCount||1)*(d.repeatCount||1));
 }
-let lastConn=null;
+let lastConn=null, failCount=0, openedAt=0;
 function openWS(url,label,keepTrying){
   lastConn=()=>openWS(url,label,keepTrying);
   wantConn=true; opened=false; clearTimeout(retryT); if(ws){ ws.onclose=null; try{ws.close();}catch(e){} }
   st.textContent='接続中…';
   try{ ws=new WebSocket(url); }
-  catch(e){ st.textContent='この画面からは接続できません。PCに保存したゲームファイルで使ってください。'; return; }
-  ws.onopen=()=>{ opened=true; st.textContent=`✅ ${label} に接続中（ギフト待ち）`; };
-  ws.onmessage=e=>{ try{ const m=JSON.parse(e.data); if(m.event==='gift') handleGiftMsg(m.data); }catch(err){} };
-  ws.onclose=()=>{
-    if(!opened && !keepTrying){ st.textContent='接続できませんでした。claude.ai上では外部接続がブロックされます。PCに保存したゲームファイルで試してください。'; wantConn=false; return; }
-    if(wantConn){ st.textContent=opened?'切断されました。5秒後に再接続します…':`${label} が見つかりません。起動しているか確認してください（5秒ごとに再試行中）`; retryT=setTimeout(lastConn,5000); }
+  catch(e){ st.textContent='この画面からは接続できません。公開したゲームのページで使ってください。'; return; }
+  ws.onopen=()=>{ opened=true; openedAt=Date.now(); st.textContent=`✅ ${label} に接続中（ギフト待ち）`; };
+  ws.onmessage=e=>{ try{
+    const m=JSON.parse(e.data);
+    if(m.event==='gift'){ failCount=0; handleGiftMsg(m.data); }
+    else if(m.event==='error'||m.error){ const d=m.data||{}; st.textContent='⚠️ '+(d.message||m.message||m.error||'エラー'); }
+    else if(m.event==='roomInfo'||m.event==='connected'){ failCount=0; st.textContent=`✅ ${label} に接続中（ギフト待ち）`; }
+  }catch(err){} };
+  ws.onclose=ev=>{
+    if(!opened && !keepTrying){ st.textContent='接続できませんでした。ネット接続とAPIキーを確認してください。'; wantConn=false; return; }
+    if(!wantConn) return;
+    // すぐ切れた＝IDが違う・配信していない可能性。無料枠を使い切らないよう3回で止める
+    if(!opened || Date.now()-openedAt<15000) failCount++; else failCount=0;
+    if(failCount>=3 && !keepTrying){
+      wantConn=false;
+      st.textContent=`❌ ${label} につながりませんでした。IDが正しいか、今LIVE配信中かを確認して、もう一度「接続」を押してください。`+(ev&&ev.reason?`（${ev.reason}）`:'');
+      return;
+    }
+    st.textContent=opened?`切断されました。5秒後に再接続します…（${failCount}/3）`:`${label} が見つかりません。起動しているか確認してください（5秒ごとに再試行中）`;
+    retryT=setTimeout(lastConn,5000);
   };
 }
 function connect(){
@@ -473,7 +489,7 @@ function connect(){
   try{ localStorage.setItem('ttUser',user); localStorage.setItem('ttKey',key); }catch(e){}
   openWS(`wss://api.tik.tools?uniqueId=${encodeURIComponent(user)}&apiKey=${encodeURIComponent(key)}`,`@${user} のLIVE`,false);
 }
-document.getElementById('conn').onclick=connect;
+document.getElementById('conn').onclick=()=>{ failCount=0; connect(); };
 document.getElementById('connTF').onclick=()=>{ try{ localStorage.setItem('autoTF','1'); }catch(e){} openWS('ws://localhost:21213/','TikFinity',true); };
 try{ if(localStorage.getItem('autoTF')==='1' && location.protocol==='file:') openWS('ws://localhost:21213/','TikFinity',true); }catch(e){}
 /* 外部ツールから直接渡す入口：receiveGift({uniqueId, nickname, diamondCount, repeatCount}) */
